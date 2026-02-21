@@ -1,14 +1,11 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import logging
 import uuid
 from datetime import datetime
-import os
 
-from app.model import ChatRequest, ChatResponse, ConversationCreate 
+from app.models import ChatRequest, ChatResponse 
 from app.chatbot import chatbot
 from app.db import db
 
@@ -17,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("AI SaaS Backend starting...")
+    logger.info("🚀 AI SaaS Backend starting...")
     yield
     logger.info("🛑 AI SaaS Backend shutting down...")
 
@@ -28,40 +25,28 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "https://ai-saas-frontend.vercel.app",
+        "https://*.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Mount static files
-static_path = os.path.join(os.path.dirname(__file__), "../frontend/dist")
-if os.path.exists(static_path):
-    app.mount("/static", StaticFiles(directory=static_path), name="static")
 
 @app.get("/")
 async def root():
     return {
         "message": "AI SaaS API is running! 🤖",
         "docs": "/docs",
-        "features": ["Persistent Memory", "MongoDB Storage", "Gemini AI"]
+        "health": "/health",
+        "version": "1.0.0"
     }
-
-# Catch-all route to serve the React app
-@app.get("/{full_path:path}")
-async def serve_react_app(full_path: str):
-    # Check if it's an API route
-    if full_path.startswith("api/") or full_path in ["docs", "openapi.json", "health"]:
-        return {"error": "Not found"}
-    
-    # Serve the React app
-    index_path = os.path.join(static_path, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    else:
-        return {"message": "Frontend not built yet. Run 'npm run build' in frontend directory."}
 
 @app.get("/health")
 async def health_check():
@@ -73,23 +58,20 @@ async def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    """
-    Chat endpoint with MEMORY - AI remembers the full conversation!
-    """
+    """Chat endpoint with MEMORY"""
     try:
-        # Generate conversation ID if not provided
         conv_id = req.conversation_id or str(uuid.uuid4())
         
-        # 🧠 LOAD CONVERSATION HISTORY FROM MONGODB
+        # Load history
         history = []
         if req.use_memory:
             history = list(db.messages.find(
                 {"conversation_id": conv_id, "user_id": req.user_id},
                 {"_id": 0, "user_message": 1, "bot_reply": 1}
             ).sort("timestamp", 1))
-            logger.info(f"🧠 Loaded {len(history)} messages from history for context")
+            logger.info(f"🧠 Loaded {len(history)} messages from history")
         
-        # Get AI response WITH MEMORY
+        # Get AI response
         reply = chatbot.ask_ai(
             message=req.message,
             user_id=req.user_id,
@@ -104,7 +86,7 @@ async def chat(req: ChatRequest):
             "user_message": req.message,
             "bot_reply": reply,
             "timestamp": datetime.utcnow(),
-            "model": "gemini-1.5-pro"
+            "model": "gemini-1.5-flash"
         }
         db.messages.insert_one(message_doc)
         
@@ -125,7 +107,7 @@ async def chat(req: ChatRequest):
             upsert=True
         )
         
-        logger.info(f"💬 Chat processed with memory for user: {req.user_id}")
+        logger.info(f"💬 Chat processed for user: {req.user_id}")
         
         return ChatResponse(
             reply=reply,
@@ -167,10 +149,12 @@ async def delete_conversation(conversation_id: str, user_id: str):
     try:
         db.conversations.delete_one({"id": conversation_id, "user_id": user_id})
         db.messages.delete_many({"conversation_id": conversation_id, "user_id": user_id})
-        # Clear from memory too
+        
+        # Clear from memory
         conv_key = f"{user_id}:{conversation_id}"
         if conv_key in chatbot.conversations:
             del chatbot.conversations[conv_key]
+            
         return {"message": "Conversation deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
