@@ -25,14 +25,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-
+# CORS - Fixed: removed space, added explicit URLs
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
-        "https://ai-saas-frontend.vercel.app",
-        "https://*.vercel.app",
+        "https://lecksibot.vercel.app",  
+        "https://ai-saa-s-chatbot.vercel.app", 
     ],
     allow_credentials=True,
     allow_methods=["*"],
