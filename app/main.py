@@ -1,9 +1,13 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import logging
 import uuid
 from datetime import datetime
+from typing import Optional, List
+import os
+import shutil
 
 from app.models import ChatRequest, ChatResponse 
 from app.chatbot import chatbot
@@ -16,6 +20,10 @@ from app.routers import payment
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Create uploads directory
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,12 +45,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS
+# CORS - UPDATED with localhost:5173
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:5173",
+        "http://localhost:5173",      # Vite dev server
+        "http://127.0.0.1:5173",      # Alternative localhost
         "https://lecksibot.vercel.app",
         "https://ai-saa-s-chatbot.vercel.app",
     ],
@@ -79,17 +88,20 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
-    
+
+# UPDATED /chat endpoint with file upload support
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
-    req: ChatRequest, 
+    message: str = Form(...),
+    conversation_id: Optional[str] = Form(None),
+    use_memory: bool = Form(True),
+    files: List[UploadFile] = File(default=[]),
     current_user: dict = Depends(get_current_active_user)
 ):
-    """Chat endpoint with authentication and MEMORY"""
+    """Chat endpoint with file upload support"""
     try:
-        # Get user_id from JWT token, ignore request body user_id
         user_id = current_user["id"]
-        conv_id = req.conversation_id or str(uuid.uuid4())
+        conv_id = conversation_id or str(uuid.uuid4())
         
         # Check message limits for free tier
         if current_user.get("role") == "free":
@@ -101,29 +113,87 @@ async def chat(
                     detail="Message limit reached. Upgrade to Pro to continue."
                 )
         
+        # Validate file types and sizes
+        MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+        ALLOWED_TYPES = {
+            'image': ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+            'document': ['application/pdf', 'text/plain', 'application/msword', 
+                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
+        }
+        
+        saved_files = []
+        file_data = []  # For AI processing
+        
+        for file in files:
+            if file.size > MAX_FILE_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File {file.filename} too large. Max 5MB."
+                )
+            
+            # Check file type
+            file_type = None
+            if file.content_type in ALLOWED_TYPES['image']:
+                file_type = 'image'
+            elif file.content_type in ALLOWED_TYPES['document']:
+                file_type = 'document'
+            else:
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"File type {file.content_type} not supported."
+                )
+            
+            # Save file
+            file_ext = os.path.splitext(file.filename)[1]
+            unique_filename = f"{uuid.uuid4()}{file_ext}"
+            file_path = os.path.join(UPLOAD_DIR, unique_filename)
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            saved_files.append({
+                "original_name": file.filename,
+                "saved_name": unique_filename,
+                "path": file_path,
+                "type": file_type,
+                "content_type": file.content_type
+            })
+            
+            # Read file content for AI
+            file.file.seek(0)
+            content = await file.read()
+            file_data.append({
+                "type": file_type,
+                "content": content,
+                "mime_type": file.content_type,
+                "filename": file.filename
+            })
+        
         # Load history
         history = []
-        if req.use_memory:
+        if use_memory:
             history = list(db.messages.find(
                 {"conversation_id": conv_id, "user_id": user_id},
                 {"_id": 0, "user_message": 1, "bot_reply": 1}
             ).sort("timestamp", 1))
             logger.info(f"🧠 Loaded {len(history)} messages from history")
         
-        # Get AI response
+        # Get AI response with files
         reply = chatbot.ask_ai(
-            message=req.message,
+            message=message,
             user_id=user_id,
             conversation_id=conv_id,
-            history=history if req.use_memory else None
+            history=history if use_memory else None,
+            files=file_data if file_data else None
         )
         
         # Store in MongoDB
         message_doc = {
             "user_id": user_id,
             "conversation_id": conv_id,
-            "user_message": req.message,
+            "user_message": message,
             "bot_reply": reply,
+            "files": saved_files,
             "timestamp": datetime.utcnow(),
             "model": "gemini-1.5-flash"
         }
@@ -147,13 +217,13 @@ async def chat(
                 },
                 "$setOnInsert": {
                     "created_at": datetime.utcnow(),
-                    "title": req.message[:50] + "..." if len(req.message) > 50 else req.message
+                    "title": message[:50] + "..." if len(message) > 50 else message
                 }
             },
             upsert=True
         )
         
-        logger.info(f"💬 Chat processed for user: {user_id}")
+        logger.info(f"💬 Chat processed for user: {user_id} with {len(files)} files")
         
         return ChatResponse(
             reply=reply,
@@ -203,6 +273,19 @@ async def delete_conversation(
 ):
     """Delete a conversation and its messages"""
     try:
+        # Delete associated files first
+        messages = db.messages.find(
+            {"conversation_id": conversation_id, "user_id": current_user["id"]}
+        )
+        for msg in messages:
+            if msg.get("files"):
+                for file in msg["files"]:
+                    try:
+                        if os.path.exists(file["path"]):
+                            os.remove(file["path"])
+                    except Exception as e:
+                        logger.warning(f"Failed to delete file {file['path']}: {e}")
+        
         db.conversations.delete_one({"id": conversation_id, "user_id": current_user["id"]})
         db.messages.delete_many({"conversation_id": conversation_id, "user_id": current_user["id"]})
         
@@ -214,3 +297,13 @@ async def delete_conversation(
         return {"message": "Conversation deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Serve uploaded files (optional - for displaying in chat history)
+@app.get("/uploads/{filename}")
+async def get_upload(filename: str, current_user: dict = Depends(get_current_active_user)):
+    """Serve uploaded files securely"""
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(file_path)
