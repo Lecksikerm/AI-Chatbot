@@ -51,20 +51,20 @@ class Database:
             raise
     
     def _create_indexes(self):
-        """Create indexes for better query performance"""
-        try:
-            # Index for faster message queries
-            self.db.messages.create_index([("user_id", 1), ("conversation_id", 1)])
-            self.db.messages.create_index([("timestamp", -1)])
-            
-            # Index for conversations
-            self.db.conversations.create_index([("user_id", 1), ("updated_at", -1)])
-            self.db.conversations.create_index([("id", 1)], unique=True)
-            
-            logger.info("✅ Database indexes created")
-        except Exception as e:
-            logger.warning(f"⚠️ Index creation warning: {e}")
-    
+     try:
+        # Existing indexes...
+        self.db.messages.create_index([("user_id", 1), ("conversation_id", 1)])
+        self.db.messages.create_index([("timestamp", -1)])
+        self.db.conversations.create_index([("user_id", 1), ("updated_at", -1)])
+        self.db.conversations.create_index([("id", 1)], unique=True)
+        
+        # Payment indexes
+        self.db.payments.create_index([("reference", 1)], unique=True)
+        self.db.payments.create_index([("user_id", 1), ("status", 1)])
+        
+        logger.info("✅ Database indexes created")
+     except Exception as e:
+        logger.warning(f"⚠️ Index creation warning: {e}")
     @property
     def users(self):
         return self.db["users"]
@@ -76,6 +76,10 @@ class Database:
     @property
     def conversations(self):
         return self.db["conversations"]
+    
+    @property
+    def payments(self):
+     return self.db["payments"]
 
 # Global instance
 db = Database()
