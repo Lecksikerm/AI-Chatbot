@@ -1,19 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import os
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from bson import ObjectId
-import hashlib
-import os
 
-
-# ==============================
-# CONFIGURATION
-# ==============================
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
@@ -30,40 +24,20 @@ pwd_context = CryptContext(
 security = HTTPBearer()
 
 
-# ==============================
-# TOKEN MODEL
-# ==============================
-
 class TokenData(BaseModel):
     user_id: Optional[str] = None
     email: Optional[str] = None
 
 
-# ==============================
-# PASSWORD HANDLING
-# ==============================
-
-def _pre_hash(password: str) -> str:
-    """
-    SHA256 pre-hash to avoid bcrypt 72-byte limitation.
-    Always returns 64-character hex string.
-    """
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
-
-
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(_pre_hash(password))
+    return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     if not hashed_password:
         return False
-    return pwd_context.verify(_pre_hash(plain_password), hashed_password)
+    return pwd_context.verify(plain_password, hashed_password)
 
-
-# ==============================
-# JWT HANDLING
-# ==============================
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
@@ -79,10 +53,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-
-# ==============================
-# AUTH DEPENDENCIES
-# ==============================
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security)
@@ -101,7 +71,6 @@ async def get_current_user(
         )
 
         user_id: str = payload.get("sub")
-        email: str = payload.get("email")
 
         if not user_id:
             raise credentials_exception
@@ -109,7 +78,6 @@ async def get_current_user(
     except JWTError:
         raise credentials_exception
 
-    # Verify user exists
     from app.db import db
 
     user = db.users.find_one({"id": user_id})
