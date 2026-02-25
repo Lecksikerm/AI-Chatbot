@@ -8,7 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-
+# JWT config
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY must be set in environment variables")
@@ -16,8 +16,9 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
+# Use Argon2 (modern password hashing, no length limits)
 pwd_context = CryptContext(
-    schemes=["bcrypt"],
+    schemes=["argon2"],
     deprecated="auto"
 )
 
@@ -30,16 +31,27 @@ class TokenData(BaseModel):
 
 
 def get_password_hash(password: str) -> str:
+    """
+    Hash password using Argon2.
+    Argon2 supports long passwords and is more secure than bcrypt.
+    """
     return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a password against its hash.
+    Returns False if hash is invalid or password mismatch.
+    """
     if not hashed_password:
         return False
     return pwd_context.verify(plain_password, hashed_password)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """
+    Create JWT access token.
+    """
     to_encode = data.copy()
 
     expire = datetime.now(timezone.utc) + (
@@ -57,6 +69,10 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ):
+    """
+    Decode JWT and return user from database.
+    Raises 401 if token invalid or user not found.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or expired token",
@@ -91,6 +107,9 @@ async def get_current_user(
 def get_current_active_user(
     current_user: dict = Depends(get_current_user)
 ):
+    """
+    Ensure user is active.
+    """
     if not current_user.get("is_active", True):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
